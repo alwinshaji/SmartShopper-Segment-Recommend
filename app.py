@@ -1,86 +1,105 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import MinMaxScaler
 import joblib
 import zipfile
 import os
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import CountVectorizer
 
-# -------- App Setup --------
-st.set_page_config(page_title="SmartShopper", layout="centered")
-st.title("🛒 SmartShopper")
-st.markdown("### 💡 Intelligent Product Recommendation & Customer Segmentation")
+# ---------- PAGE SETUP ----------
+st.set_page_config(page_title="SmartShopper 🛍️", layout="centered")
+st.title("🛍️ SmartShopper")
+st.markdown("#### Your Personal Assistant for Shopping and Customer Insights")
 
-# -------- Data Load --------
-@st.cache_data
-def load_product_data():
-    if os.path.exists("product_data.csv"):
-        return pd.read_csv("product_data.csv")
-    elif os.path.exists("product_data.zip"):
-        with zipfile.ZipFile("product_data.zip", 'r') as zip_ref:
-            zip_ref.extractall()
-        return pd.read_csv("product_data.csv")
-    else:
-        st.error("❌ Product data not found. Please upload `product_data.zip` containing `product_data.csv`.")
-        return None
 
-# Load Product Data
-product_df = load_product_data()
-
-# Load KMeans Model
+# ---------- LOAD MODELS ----------
 @st.cache_resource
-def load_model():
-    return joblib.load("Kmeans_model.pkl")
+def load_kmeans_model():
+    return joblib.load("kmeans_model.joblib")
 
-model = load_model()
+@st.cache_resource
+def load_scaler():
+    return joblib.load("scaler.joblib")
 
-# -------- Tabs --------
-tab1, tab2 = st.tabs(["🎯 Product Recommendation", "📊 Customer Segmentation"])
+@st.cache_data
+def load_rfm_data():
+    return pd.read_csv("rfm_clustered.csv")
 
-# -------- TAB 1: Product Recommendation --------
+
+# ---------- TAB LAYOUT ----------
+tab1, tab2 = st.tabs(["📦 Product Recommender", "👥 Customer Segmentation"])
+
+# ========== TAB 1: PRODUCT RECOMMENDER ==========
 with tab1:
-    st.subheader("🔍 Find Similar Products")
+    st.subheader("📦 Get Product Recommendations")
+    uploaded_file = st.file_uploader("Upload product_data.zip", type="zip")
 
-    if product_df is not None:
-        product_list = product_df['Description'].dropna().unique()
-        product_input = st.text_input("Enter a product name:", "")
+    if uploaded_file:
+        with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+            zip_ref.extractall("product_data")
+        try:
+            product_df = pd.read_csv("product_data/product_data.csv")
+            st.success("Data loaded successfully!")
+        except Exception as e:
+            st.error(f"Error loading CSV: {e}")
+            st.stop()
 
-        if st.button("Get Recommendations"):
-            if product_input:
-                vectorizer = CountVectorizer().fit_transform(product_list)
-                input_vec = CountVectorizer().fit(product_list).transform([product_input])
-                similarity = cosine_similarity(input_vec, vectorizer).flatten()
+        # Pivot Table: Product-user matrix
+        df_pivot = product_df.pivot_table(index="Description", columns="CustomerID", values="Quantity", aggfunc="sum").fillna(0)
 
-                top_indices = similarity.argsort()[-6:][::-1]  # top 5 + input itself
-                recommendations = [product_list[i] for i in top_indices if product_list[i] != product_input][:5]
+        # Cosine similarity matrix
+        similarity = cosine_similarity(df_pivot)
 
-                if recommendations:
-                    st.markdown("##### 🧠 Recommended Products:")
-                    for rec in recommendations:
-                        st.success(rec)
-                else:
-                    st.warning("No similar products found.")
+        # Map for index
+        product_names = df_pivot.index.tolist()
+        product_map = {name: idx for idx, name in enumerate(product_names)}
+
+        product_input = st.text_input("Enter a product name (case-sensitive)", "")
+        if st.button("🔍 Get Recommendations"):
+            if product_input in product_map:
+                idx = product_map[product_input]
+                sim_scores = list(enumerate(similarity[idx]))
+                sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+                top_5 = [product_names[i] for i, score in sim_scores[1:6]]
+
+                st.markdown("### 🧠 You might also like:")
+                for i, rec in enumerate(top_5, 1):
+                    st.markdown(f"**{i}. {rec}**")
             else:
-                st.warning("Please enter a product name.")
+                st.warning("Product not found. Try with a valid product name from the dataset.")
 
-# -------- TAB 2: Customer Segmentation --------
+# ========== TAB 2: CUSTOMER SEGMENTATION ==========
 with tab2:
-    st.subheader("👥 Segment a Customer Using RFM Values")
+    st.subheader("👥 RFM-based Customer Segmentation")
 
-    recency = st.number_input("Recency (days since last purchase)", min_value=0)
-    frequency = st.number_input("Frequency (number of purchases)", min_value=0)
-    monetary = st.number_input("Monetary (total spend)", min_value=0.0, step=0.01)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        recency = st.number_input("Recency (days)", min_value=0, value=30)
+    with col2:
+        frequency = st.number_input("Frequency", min_value=1, value=5)
+    with col3:
+        monetary = st.number_input("Monetary Value", min_value=1, value=100)
 
-    if st.button("Predict Cluster"):
-        input_data = pd.DataFrame([[recency, frequency, monetary]],
-                                  columns=["Recency", "Frequency", "Monetary"])
-        cluster_label = model.predict(input_data)[0]
+    if st.button("🎯 Predict Cluster"):
+        kmeans = load_kmeans_model()
+        scaler = load_scaler()
 
-        segment_names = {
-            0: "High-Value",
-            1: "Regular",
-            2: "Occasional",
-            3: "At-Risk"
+        input_df = pd.DataFrame([[recency, frequency, monetary]], columns=["Recency", "Frequency", "Monetary"])
+        input_scaled = scaler.transform(input_df)
+        cluster = kmeans.predict(input_scaled)[0]
+
+        cluster_labels = {
+            0: "🎯 High-Value Customer",
+            1: "🔁 Regular Buyer",
+            2: "🧊 Occasional Buyer",
+            3: "⚠️ At-Risk Customer"
         }
 
-        st.success(f"Predicted Segment: **{segment_names.get(cluster_label, 'Unknown')}**")
+        st.success(f"Segment: {cluster_labels.get(cluster, 'Unknown')}")
+        st.markdown("Use this insight to personalize marketing and sales strategies!")
+
+# ---------- FOOTER ----------
+st.markdown("---")
+st.markdown("Built with ❤️ using Streamlit | SmartShopper 2025")
+
