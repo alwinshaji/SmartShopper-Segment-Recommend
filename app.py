@@ -1,89 +1,104 @@
 import streamlit as st
 import pandas as pd
-import joblib
-from zipfile import ZipFile
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
+import zipfile
 import os
+import shutil
+from joblib import load
 
-# Load product data from zip
-@st.cache_data
-def load_product_data():
-    with ZipFile("product_data.zip", 'r') as zip_ref:
-        zip_ref.extractall("temp_data")
-    df = pd.read_csv("temp_data/product_data.csv")
-    return df
+# Set page config
+st.set_page_config(
+    page_title="SmartShopper Segment & Recommend",
+    layout="wide",
+    page_icon="🛍️"
+)
+
+# App title and header
+st.markdown("""
+    <h1 style='text-align: center; color: #2E86C1;'>🛍️ SmartShopper: Segment & Recommend</h1>
+    <h4 style='text-align: center; color: #117A65;'>Know your customer. Serve better. Sell smart.</h4>
+    <hr style='border: 1px solid #D5DBDB;'>
+""", unsafe_allow_html=True)
+
+# Load the model
+model = load("kmeans_model.joblib")
 
 # Load RFM clustered data
+rfm_df = pd.read_csv("rfm_clustered.csv")
+
+# Load and extract product data
 @st.cache_data
-def load_rfm_data():
-    return pd.read_csv("rfm_clustered.csv")
 
-# Load models
-@st.cache_resource
-def load_models():
-    kmeans = joblib.load("kmeans_model.joblib")
-    scaler = joblib.load("scaler.joblib")
-    return kmeans, scaler
+def load_product_data():
+    zip_path = "product_data.zip"
+    extract_dir = "temp_data"
 
-# Recommendation function
-def get_recommendations(product_name, df):
-    product_features = df[['StockCode', 'Description']].drop_duplicates()
-    pivot = df.pivot_table(index='CustomerID', columns='Description', values='TotalPrice', aggfunc='sum', fill_value=0)
-    similarity = cosine_similarity(pivot.T)
-    sim_df = pd.DataFrame(similarity, index=pivot.columns, columns=pivot.columns)
+    if not os.path.exists(extract_dir):
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
 
-    if product_name not in sim_df.columns:
-        return ["Product not found in dataset"]
-
-    recommendations = sim_df[product_name].sort_values(ascending=False)[1:6].index.tolist()
-    return recommendations
-
-# Segmentation function
-def predict_cluster(r, f, m, model, scaler):
-    data = pd.DataFrame([[r, f, m]], columns=["Recency", "Frequency", "Monetary"])
-    scaled = scaler.transform(data)
-    cluster = model.predict(scaled)[0]
-    labels = {0: "High-Value", 1: "Regular", 2: "Occasional", 3: "At-Risk"}
-    return labels.get(cluster, f"Cluster {cluster}")
-
-# UI starts here
-st.set_page_config(page_title="SmartShopper", layout="wide")
-st.title("🛍️ SmartShopper - Personalized Recommendations & Customer Insights")
+    for file in os.listdir(extract_dir):
+        if file.endswith(".csv"):
+            product_df = pd.read_csv(os.path.join(extract_dir, file))
+            return product_df
+    return pd.DataFrame()
 
 product_df = load_product_data()
-rfm_df = load_rfm_data()
-kmeans_model, scaler_model = load_models()
 
-st.sidebar.header("🔍 Choose a Module")
-option = st.sidebar.radio("Select Module:", ["Product Recommendation", "Customer Segmentation"])
+# Color palette
+cluster_colors = ['#58D68D', '#F4D03F', '#5DADE2', '#EC7063']
 
-if option == "Product Recommendation":
-    st.subheader("🎯 Product Recommendation")
-    product_list = sorted(product_df['Description'].dropna().unique().tolist())
-    selected_product = st.selectbox("Choose a product to get similar recommendations:", product_list)
+# Tabs
+tabs = st.tabs(["📊 Segment Summary", "👤 Customer Prediction", "🎯 Product Recommendations"])
 
-    if st.button("🔎 Get Recommendations"):
-        with st.spinner("Finding similar products..."):
-            recs = get_recommendations(selected_product, product_df)
-        st.success("Here are 5 similar products:")
-        for i, rec in enumerate(recs, 1):
-            st.markdown(f"**{i}. {rec}**")
+# --- Tab 1: Segment Summary --- #
+with tabs[0]:
+    st.markdown("## 🔍 Customer Segment Summary")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    sns.countplot(x='Cluster', data=rfm_df, palette=cluster_colors, ax=ax)
+    ax.set_title("Customer Distribution by Cluster", fontsize=14)
+    st.pyplot(fig)
 
-elif option == "Customer Segmentation":
-    st.subheader("📊 Customer Segmentation")
-    st.markdown("Input your **Recency**, **Frequency**, and **Monetary** values:")
+    st.markdown("### 📈 Segment Characteristics")
+    seg_stats = rfm_df.groupby('Cluster')[['Recency', 'Frequency', 'Monetary']].mean().round(2)
+    st.dataframe(seg_stats.style.background_gradient(cmap='YlGnBu'))
 
-    recency = st.number_input("Recency (days since last purchase)", min_value=0, value=30)
-    frequency = st.number_input("Frequency (number of purchases)", min_value=0, value=5)
-    monetary = st.number_input("Monetary (total spend)", min_value=0.0, value=200.0, step=10.0)
+# --- Tab 2: Prediction --- #
+with tabs[1]:
+    st.markdown("## 👤 Predict Customer Segment")
+    with st.form("predict_form"):
+        recency = st.number_input("Recency (days since last purchase):", min_value=0)
+        frequency = st.number_input("Frequency (no. of purchases):", min_value=0)
+        monetary = st.number_input("Monetary (total amount spent):", min_value=0.0)
+        submitted = st.form_submit_button("Predict Segment")
 
-    if st.button("📈 Predict Cluster"):
-        with st.spinner("Analyzing customer segment..."):
-            segment = predict_cluster(recency, frequency, monetary, kmeans_model, scaler_model)
-        st.success(f"🧠 Predicted Segment: **{segment}**")
+        if submitted:
+            cluster = model.predict([[recency, frequency, monetary]])[0]
+            st.success(f"Predicted Customer Segment: {cluster}")
+            st.markdown(f"<p style='color:{cluster_colors[cluster]}; font-size:18px;'>Segment {cluster}: Tailored marketing strategy applicable.</p>", unsafe_allow_html=True)
 
-# Clean up extracted temp files
+# --- Tab 3: Product Recommendations --- #
+with tabs[2]:
+    st.markdown("## 🎯 Get Product Recommendations")
+
+    product_names = product_df['Description'].dropna().unique()
+    selected_product = st.selectbox("Choose a product you like:", sorted(product_names))
+
+    st.markdown("### 🛍️ Similar Products You Might Like")
+    if selected_product:
+        matched_products = product_df[product_df['Description'].str.contains(selected_product[:4], case=False, na=False)]
+        recommendations = matched_products['Description'].dropna().unique().tolist()[:10]
+
+        if recommendations:
+            for rec in recommendations:
+                st.markdown(f"- {rec}")
+        else:
+            st.warning("No similar products found. Try a broader product keyword.")
+
+# Clean temp_data if it exists (safely)
 if os.path.exists("temp_data"):
-    import shutil
-    shutil.rmtree("temp_data")
+    try:
+        shutil.rmtree("temp_data")
+    except Exception as e:
+        pass
