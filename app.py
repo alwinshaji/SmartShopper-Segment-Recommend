@@ -1,88 +1,89 @@
 import streamlit as st
 import pandas as pd
 import joblib
-import zipfile
+from zipfile import ZipFile
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import StandardScaler
 import os
-import requests
-from io import BytesIO
 
-# Set app title
-st.set_page_config(page_title="SmartShopper", layout="centered")
-st.title("🛍️ SmartShopper")
-
-# Load and extract product data.zip from a hosted URL
+# Load product data from zip
 @st.cache_data
 def load_product_data():
-    url = "https://github.com/alwnshaji/public-assets/raw/main/product_data.zip"  # replace with your actual public zip file link
-    r = requests.get(url)
-    z = zipfile.ZipFile(BytesIO(r.content))
-    z.extractall("product_data")
-    df = pd.read_csv("product_data/product_data.csv")
+    with ZipFile("product_data.zip", 'r') as zip_ref:
+        zip_ref.extractall("temp_data")
+    df = pd.read_csv("temp_data/product_data.csv")
     return df
+
+# Load RFM clustered data
+@st.cache_data
+def load_rfm_data():
+    return pd.read_csv("rfm_clustered.csv")
 
 # Load models
 @st.cache_resource
 def load_models():
-    kmeans_model = joblib.load("kmeans_model.joblib")
+    kmeans = joblib.load("kmeans_model.joblib")
     scaler = joblib.load("scaler.joblib")
-    return kmeans_model, scaler
+    return kmeans, scaler
 
-# Load product data
+# Recommendation function
+def get_recommendations(product_name, df):
+    product_features = df[['StockCode', 'Description']].drop_duplicates()
+    pivot = df.pivot_table(index='CustomerID', columns='Description', values='TotalPrice', aggfunc='sum', fill_value=0)
+    similarity = cosine_similarity(pivot.T)
+    sim_df = pd.DataFrame(similarity, index=pivot.columns, columns=pivot.columns)
+
+    if product_name not in sim_df.columns:
+        return ["Product not found in dataset"]
+
+    recommendations = sim_df[product_name].sort_values(ascending=False)[1:6].index.tolist()
+    return recommendations
+
+# Segmentation function
+def predict_cluster(r, f, m, model, scaler):
+    data = pd.DataFrame([[r, f, m]], columns=["Recency", "Frequency", "Monetary"])
+    scaled = scaler.transform(data)
+    cluster = model.predict(scaled)[0]
+    labels = {0: "High-Value", 1: "Regular", 2: "Occasional", 3: "At-Risk"}
+    return labels.get(cluster, f"Cluster {cluster}")
+
+# UI starts here
+st.set_page_config(page_title="SmartShopper", layout="wide")
+st.title("🛍️ SmartShopper - Personalized Recommendations & Customer Insights")
+
 product_df = load_product_data()
+rfm_df = load_rfm_data()
+kmeans_model, scaler_model = load_models()
 
-# Load joblib models
-kmeans_model, scaler = load_models()
+st.sidebar.header("🔍 Choose a Module")
+option = st.sidebar.radio("Select Module:", ["Product Recommendation", "Customer Segmentation"])
 
-# Sidebar navigation
-page = st.sidebar.radio("Choose Module", ["📦 Product Recommendation", "👥 Customer Segmentation"])
-
-# 1️⃣ Product Recommendation Module
-if page == "📦 Product Recommendation":
+if option == "Product Recommendation":
     st.subheader("🎯 Product Recommendation")
+    product_list = sorted(product_df['Description'].dropna().unique().tolist())
+    selected_product = st.selectbox("Choose a product to get similar recommendations:", product_list)
 
-    product_names = sorted(product_df['ProductName'].unique())
-    selected_product = st.selectbox("Choose a product", product_names)
+    if st.button("🔎 Get Recommendations"):
+        with st.spinner("Finding similar products..."):
+            recs = get_recommendations(selected_product, product_df)
+        st.success("Here are 5 similar products:")
+        for i, rec in enumerate(recs, 1):
+            st.markdown(f"**{i}. {rec}**")
 
-    if st.button("🔍 Get Recommendations"):
-        from sklearn.metrics.pairwise import cosine_similarity
+elif option == "Customer Segmentation":
+    st.subheader("📊 Customer Segmentation")
+    st.markdown("Input your **Recency**, **Frequency**, and **Monetary** values:")
 
-        product_pivot = product_df.pivot_table(index='CustomerID', columns='ProductName', values='Rating').fillna(0)
+    recency = st.number_input("Recency (days since last purchase)", min_value=0, value=30)
+    frequency = st.number_input("Frequency (number of purchases)", min_value=0, value=5)
+    monetary = st.number_input("Monetary (total spend)", min_value=0.0, value=200.0, step=10.0)
 
-        if selected_product not in product_pivot.columns:
-            st.warning("Product not found in the dataset.")
-        else:
-            similarity_scores = cosine_similarity(product_pivot.T)
-            product_index = list(product_pivot.columns).index(selected_product)
-            similar_indices = similarity_scores[product_index].argsort()[::-1][1:6]
-            recommended_products = [product_pivot.columns[i] for i in similar_indices]
+    if st.button("📈 Predict Cluster"):
+        with st.spinner("Analyzing customer segment..."):
+            segment = predict_cluster(recency, frequency, monetary, kmeans_model, scaler_model)
+        st.success(f"🧠 Predicted Segment: **{segment}**")
 
-            st.markdown("### 🧠 Recommended Products:")
-            for i, prod in enumerate(recommended_products, 1):
-                st.success(f"{i}. {prod}")
-
-# 2️⃣ Customer Segmentation Module
-elif page == "👥 Customer Segmentation":
-    st.subheader("🎯 Customer Segmentation")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        recency = st.number_input("Recency (days)", min_value=0)
-    with col2:
-        frequency = st.number_input("Frequency (purchases)", min_value=0)
-    with col3:
-        monetary = st.number_input("Monetary (₹)", min_value=0)
-
-    if st.button("📊 Predict Cluster"):
-        input_data = pd.DataFrame([[recency, frequency, monetary]], columns=['Recency', 'Frequency', 'Monetary'])
-        input_scaled = scaler.transform(input_data)
-        cluster = kmeans_model.predict(input_scaled)[0]
-
-        labels = {
-            0: "💎 High-Value",
-            1: "🧍 Regular",
-            2: "📉 At-Risk",
-            3: "⏳ Occasional"
-        }
-
-        st.markdown("### 🧬 Customer Segment:")
-        st.info(f"Predicted Segment: **{labels.get(cluster, 'Unknown')}**")
+# Clean up extracted temp files
+if os.path.exists("temp_data"):
+    import shutil
+    shutil.rmtree("temp_data")
